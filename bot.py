@@ -7,45 +7,67 @@ from telegram.ext import ApplicationBuilder, ContextTypes
 # --- CONFIGURATION ---
 TOKEN = "8374784823:AAEOG1FO847MNZx56O5sgSkyc2PB5MkLF48"
 GROUP_CHAT_ID = -1003377168412 
-CHECK_INTERVAL = 3  # Check every 3 seconds
+CHECK_INTERVAL = 3  # Seconds between each table scan
 
+# Memory to track seen messages
 seen_otps = set()
 
 async def live_watcher(context: ContextTypes.DEFAULT_TYPE):
     global seen_otps
     
+    # 1. TEST TELEGRAM CONNECTION
+    try:
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID, 
+            text="✅ *iVAS Monitor Online*\nStarting browser connection...", 
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        print(f"❌ Telegram Error: Check if Bot is Admin in the group. {e}")
+        return
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     session_path = os.path.join(script_dir, "ivas_session")
 
     options = uc.ChromeOptions()
     options.add_argument(f"--user-data-dir={session_path}")
-    options.add_argument('--headless')
     
-    # These arguments help prevent the "Cannot connect to chrome" error
-    options.add_argument('--no-first-run')
-    options.add_argument('--no-service-autorun')
-    options.add_argument('--password-store=basic')
+    # --- VISIBILITY MODE ---
+    # Comment the line below if you want to hide the browser window later
+    # options.add_argument('--headless') 
+    
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
 
-    print("🔌 Attempting to connect to iVAS Live Panel...")
+    print("🔌 Opening Browser...")
+    driver = uc.Chrome(options=options)
     
     try:
-        # Initialize driver
-        driver = uc.Chrome(options=options)
-        driver.set_page_load_timeout(30) # Prevent infinite hanging
-        
         driver.get("https://www.ivasms.com/portal/live/my_sms")
-        print("✅ Connection Established. Monitoring for OTPs...")
+        
+        # Wait for initial load
+        await asyncio.sleep(15)
 
         while True:
             try:
+                # Security Check: If Cloudflare appears, we wait for you to click it
+                if "cloudflare" in driver.page_source.lower() or "Verify you are human" in driver.title:
+                    print("⚠️ Cloudflare Detected! Please click the checkbox in the Chrome window.")
+                    await asyncio.sleep(5)
+                    continue
+
+                # Locate table rows
                 rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
                 
+                # If table has data
                 if rows and "No data available" not in rows[0].text:
                     new_updates = []
                     
+                    # Scan top 5 rows for new OTPs
                     for row in rows[:5]:
                         cols = row.find_elements(By.TAG_NAME, "td")
                         if len(cols) >= 5:
+                            # Unique ID = Number + Message Content
                             msg_id = f"{cols[0].text}_{cols[4].text}"
                             
                             if msg_id not in seen_otps:
@@ -56,50 +78,44 @@ async def live_watcher(context: ContextTypes.DEFAULT_TYPE):
                                     "msg": cols[4].text
                                 })
 
+                    # Forward new updates to Telegram Group
                     for item in reversed(new_updates):
                         report = (
-                            "⚡ *LIVE OTP ALERT*\n"
+                            "🚀 *NEW OTP RECEIVED*\n"
                             "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-                            f"📱 *Num:* `{item['num']}`\n"
+                            f"📱 *Number:* `{item['num']}`\n"
                             f"🌍 *SID:* {item['sid']}\n"
-                            f"💬 *Msg:* `{item['msg']}`\n"
+                            f"💬 *Message:* `{item['msg']}`\n"
                             "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯"
                         )
                         await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=report, parse_mode='Markdown')
-                        print(f"📡 Forwarded: {item['num']}")
+                        print(f"📡 Forwarded to Group: {item['num']}")
 
+                # Keep memory clean
                 if len(seen_otps) > 100:
                     seen_otps.clear()
 
             except Exception as e:
-                # If the browser disconnects, this will catch it
-                if "target window already closed" in str(e).lower():
-                    print("❌ Browser closed. Restarting...")
-                    break 
-                await asyncio.sleep(2)
+                print(f"🔄 Scanning... (Table currently empty or loading)")
             
             await asyncio.sleep(CHECK_INTERVAL)
 
     except Exception as e:
-        print(f"🛑 Critical Driver Error: {e}")
+        print(f"🛑 Critical Error: {e}")
     finally:
-        try:
-            driver.quit()
-        except:
-            pass
+        driver.quit()
+
 if __name__ == '__main__':
-    # 1. Build the app without a job queue to avoid timezone errors
-    # 2. Add the watcher as a background task after the bot starts
+    # Initialize the Application
     app = ApplicationBuilder().token(TOKEN).job_queue(None).build()
     
-    # We use the 'post_init' approach to start our live loop safely
+    # Start the watcher as a background task
     async def post_init(application):
         asyncio.create_task(live_watcher(application))
 
     app.post_init = post_init
 
-    print("🔥 100% Live Monitor is Starting. One moment...")
+    print("🔥 Bot logic starting... Check your Telegram group for the status message.")
     
-    # In Python 3.14, run_polling() should be called directly
-    # without wrapping it in asyncio.run()
+    # Run polling for Python 3.14
     app.run_polling()
